@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>黑神话 - 牛来 | Black Myth: Niu Lai</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0B0E14;
+            color: #F8FAFC;
+            overflow: hidden;
+        }
+        
+        #gameCanvas {
+            display: block;
+            width: 100%;
+            height: 100vh;
+        }
+        
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        
+        #health-bar {
+            position: absolute;
+            top: 30px;
+            left: 30px;
+            width: 300px;
+        }
+        
+        .bar-container {
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid #1E293B;
+            border-radius: 8px;
+            padding: 12px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .bar-label {
+            font-size: 12px;
+            color: #94A3B8;
+            margin-bottom: 6px;
+            letter-spacing: 0.5px;
+        }
+        
+        .bar-bg {
+            background: #1E293B;
+            height: 12px;
+            border-radius: 6px;
+            overflow: hidden;
+            border: 1px solid #334155;
+        }
+        
+        .bar-fill {
+            height: 100%;
+            transition: width 0.3s ease;
+            border-radius: 6px;
+        }
+        
+        .health-fill {
+            background: linear-gradient(90deg, #F97316, #F59E0B);
+        }
+        
+        .stamina-fill {
+            background: linear-gradient(90deg, #22D3EE, #38BDF8);
+        }
+        
+        #stamina-bar {
+            position: absolute;
+            top: 130px;
+            left: 30px;
+            width: 300px;
+        }
+        
+        #controls {
+            position: absolute;
+            bottom: 30px;
+            left: 30px;
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid #1E293B;
+            border-radius: 12px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .control-title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #38BDF8;
+        }
+        
+        .control-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+        
+        .key {
+            background: #1E293B;
+            border: 1px solid #334155;
+            padding: 4px 10px;
+            border-radius: 4px;
+            margin-right: 10px;
+            font-family: 'IBM Plex Mono', monospace;
+            min-width: 50px;
+            text-align: center;
+        }
+        
+        #game-title {
+            position: absolute;
+            top: 30px;
+            right: 30px;
+            text-align: right;
+        }
+        
+        .title-main {
+            font-size: 28px;
+            font-weight: 700;
+            color: #F8FAFC;
+            text-shadow: 0 0 20px rgba(56, 189, 248, 0.5);
+            margin-bottom: 4px;
+        }
+        
+        .title-sub {
+            font-size: 14px;
+            color: #94A3B8;
+            letter-spacing: 2px;
+        }
+        
+        #enemy-health {
+            position: absolute;
+            top: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 400px;
+            display: none;
+        }
+        
+        .enemy-name {
+            font-size: 16px;
+            font-weight: 600;
+            color: #F97316;
+            margin-bottom: 8px;
+            text-align: center;
+        }
+        
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+        
+        .loading-text {
+            font-size: 24px;
+            color: #38BDF8;
+            margin-bottom: 20px;
+        }
+        
+        .loading-bar {
+            width: 300px;
+            height: 4px;
+            background: #1E293B;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        
+        .loading-progress {
+            height: 100%;
+            background: linear-gradient(90deg, #38BDF8, #22D3EE);
+            animation: loading 1.5s ease-in-out infinite;
+        }
+        
+        @keyframes loading {
+            0% { width: 0%; }
+            50% { width: 100%; }
+            100% { width: 0%; }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui-overlay">
+        <div id="game-title">
+            <div class="title-main">黑神话 - 牛来</div>
+            <div class="title-sub">BLACK MYTH: NIU LAI</div>
+        </div>
+        
+        <div id="health-bar" class="bar-container">
+            <div class="bar-label">生命值 HP</div>
+            <div class="bar-bg">
+                <div class="bar-fill health-fill" style="width: 100%"></div>
+            </div>
+        </div>
+        
+        <div id="stamina-bar" class="bar-container">
+            <div class="bar-label">耐力 STAMINA</div>
+            <div class="bar-bg">
+                <div class="bar-fill stamina-fill" style="width: 100%"></div>
+            </div>
+        </div>
+        
+        <div id="enemy-health" class="bar-container">
+            <div class="enemy-name">敌人</div>
+            <div class="bar-bg">
+                <div class="bar-fill health-fill" style="width: 100%"></div>
+            </div>
+        </div>
+        
+        <div id="combo-display" style="position: absolute; top: 50%; right: 50px; transform: translateY(-50%); font-size: 48px; font-weight: 700; color: #F59E0B; text-shadow: 0 0 20px rgba(245, 158, 11, 0.8); display: none; pointer-events: none;">
+            <div id="combo-number" style="font-size: 72px;">0</div>
+            <div style="font-size: 18px; color: #94A3B8; text-align: center;">COMBO</div>
+        </div>
+        
+        <div id="controls">
+            <div class="control-title">操作指南</div>
+            <div class="control-item"><span class="key">W A S D</span>移动</div>
+            <div class="control-item"><span class="key">SPACE</span>闪避翻滚</div>
+            <div class="control-item"><span class="key">J</span>轻击</div>
+            <div class="control-item"><span class="key">K</span>重击</div>
+            <div class="control-item"><span class="key">L</span>法术技能</div>
+        </div>
+        
+        <div id="loading">
+            <div class="loading-text">加载中...</div>
+            <div class="loading-bar">
+                <div class="loading-progress"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    
+    <!-- 预加载检测 -->
+    <script>
+        console.log('🔍 开始加载游戏...');
+        
+        // 监听所有错误
+        window.addEventListener('error', (e) => {
+            console.error('❌ 加载错误:', e.message, e.filename);
+            const loading = document.getElementById('loading');
+            if (loading) {
+                loading.innerHTML = `
+                    <div class="loading-text" style="color: #F97316;">加载失败</div>
+                    <div style="color: #94A3B8; font-size: 14px; margin-top: 10px;">
+                        错误: ${e.message}<br>
+                        文件: ${e.filename}
+                    </div>
+                    <div style="color: #94A3B8; font-size: 12px; margin-top: 10px;">
+                        请检查浏览器控制台获取详细信息
+                    </div>
+                `;
+            }
+        });
+        
+        // 检测Three.js是否加载
+        setTimeout(() => {
+            console.log('⏰ 检查游戏加载状态...');
+            const loading = document.getElementById('loading');
+            if (loading && loading.style.display !== 'none') {
+                console.warn('⚠️ 游戏加载超时，请检查网络连接');
+            }
+        }, 5000);
+    </script>
+    
+    <script src="debug.js"></script>
+    <script type="module" src="game.js"></script>
+</body>
+</html>
