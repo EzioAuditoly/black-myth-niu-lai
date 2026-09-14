@@ -19,6 +19,11 @@
 - **新增死亡系统**：血量归零或掉入虚空（y < −10）→ 死亡界面（死因 + 重来 / 退出）
 - **新增 `ctl.sh`**：`start|stop|restart|status|open` 一行管理本地服务
 
+## 🎮 在线试玩
+
+👉 **https://ezioauditoly.github.io/black-myth-niu-lai/**
+
+> 需要键盘操作，建议用桌面浏览器打开。
 
 ## 🕹️ 操作
 
