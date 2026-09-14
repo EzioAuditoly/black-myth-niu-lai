@@ -642,8 +642,9 @@ class NiuLai {
 
 // 敌人类
 class Enemy {
-    constructor(scene, position, name = '妖怪') {
+    constructor(scene, position, name = '妖怪', game = null) {
         this.scene = scene;
+        this.game = game;
         this.name = name;
         this.health = 100;
         this.maxHealth = 100;
@@ -652,7 +653,25 @@ class Enemy {
         this.attackRange = 3;
         this.attackCooldown = 2000;
         this.lastAttackTime = 0;
+        this.isAttacking = false;
         this.createEnemy();
+        // 怪物攻击范围圆环（红色）
+        this.attackRing = this._createRangeRing(3, 0xEF4444, 0.12);
+        this.attackRing.position.copy(position);
+        this.attackRing.position.y = 0.05;
+        this.scene.add(this.attackRing);
+    }
+
+    _createRangeRing(radius, color, opacity) {
+        const points = [];
+        const segments = 48;
+        for (let i = 0; i <= segments; i++) {
+            const angle = (i / segments) * Math.PI * 2;
+            points.push(new THREE.Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius));
+        }
+        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+        const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
+        return new THREE.Line(geometry, material);
     }
     
     createEnemy() {
@@ -719,10 +738,19 @@ class Enemy {
         // 攻击逻辑
         const now = Date.now();
         if (distance < this.attackRange && now - this.lastAttackTime > this.attackCooldown) {
+            this.isAttacking = true;
             this.attack();
             this.lastAttackTime = now;
+        } else if (now - this.lastAttackTime > 400) {
+            this.isAttacking = false;
         }
-        
+
+        // 同步攻击范围圆环位置
+        if (this.attackRing && this.mesh) {
+            this.attackRing.position.x = this.mesh.position.x;
+            this.attackRing.position.z = this.mesh.position.z;
+        }
+
         this.position.copy(this.mesh.position);
     }
     
@@ -754,10 +782,21 @@ class Enemy {
             this.die();
         }
     }
-    
+
     die() {
         if (!this.mesh) return;
-        
+
+        // 通知 Game 怪物死亡（计数 + 检查过关）
+        if (this.game?.onEnemyKilled) {
+            this.game.onEnemyKilled(this);
+        }
+
+        // 移除攻击范围圆环
+        if (this.attackRing) {
+            this.scene.remove(this.attackRing);
+            this.attackRing = null;
+        }
+
         // 死亡动画
         let elapsed = 0;
         const duration = 1;
@@ -792,6 +831,18 @@ class Game {
         this.maxParticles = 80;         // 粒子数量上限
         this.activeParticles = 0;       // 当前活跃粒子数
         this.lastEnemySpawn = 0;        // 防止反复重生
+
+        // ===== 关卡系统 =====
+        this.level = 1;                      // 当前关卡（从 1 开始）
+        this.levelConfig = null;             // 当前关卡配置
+        this.levelEnemiesRequired = 0;       // 本关需杀怪数
+        this.levelEnemiesKilled = 0;         // 已杀数
+        this.levelEnemiesSpawned = 0;        // 已生成数
+        this.gateOrb = null;                 // 过关金球 mesh
+        this.gateOrbActive = false;          // 金球是否激活（杀光后才显示）
+        this.levelMeshes = [];               // 关卡所有场景对象，销毁用
+        this.levelAnimHooks = [];            // 关卡动画 hooks（清空时也清）
+        this.levelTransitioning = false;     // 切换关卡中（防止重复触发）
 
         console.log('📋 调用 init() 方法...');
         this.init();
@@ -841,10 +892,6 @@ class Game {
         console.log('  - 创建方向指示器');
         this.createDirectionIndicator();
 
-        // 创建场景
-        console.log('  - 创建环境');
-        this.createEnvironment();
-
         // 创建玩家
         console.log('  - 创建玩家角色');
         this.player = new NiuLai(this.scene, this);
@@ -852,11 +899,14 @@ class Game {
         // 把指示器添加到玩家脚下
         this.directionIndicator.position.copy(this.player.mesh.position);
         this.directionIndicator.position.y = 0.2;
-        
-        // 创建敌人
-        console.log('  - 生成敌人');
-        this.spawnEnemies();
-        
+
+        // 初始化 castleStructures（用于碰撞检测）
+        this.castleStructures = [];
+
+        // 初始化第 1 关（场景/怪物/HUD 一站式）
+        console.log('  - 初始化第 1 关');
+        this.initLevel(1);
+
         // 事件监听
         console.log('  - 设置控制器');
         this.setupControls();
@@ -871,6 +921,9 @@ class Game {
             console.log('🎮 游戏准备就绪，隐藏加载界面');
             document.getElementById('loading').style.display = 'none';
             this.gameState.gameStarted = true;
+
+            // 显示一次性操作提示（4 秒后自动消失）
+            this.showCombatTips();
         }, 1000);
         
         // 开始游戏循环
@@ -938,6 +991,666 @@ class Game {
         this.directionIndicator.visible = true;
         this.scene.add(this.directionIndicator);
     }
+
+    // =========================================================
+    // 关卡系统
+    // =========================================================
+
+    /**
+     * 6 种关卡风格，每种决定天空/地面/平台/装饰的色调和氛围
+     */
+    LEVEL_THEMES() {
+        return [
+            {
+                name: '青竹幽径',
+                sky: 0x87CEEB, fog: 0xC8E6F5,
+                ground: 0x7CB342, platform: 0x9E9E9E,
+                bamboo: true, streams: true, rocks: true, pillars: true,
+                accent: 0x8B5A2B
+            },
+            {
+                name: '黄沙古道',
+                sky: 0xF4D03F, fog: 0xFAE5B7,
+                ground: 0xD4AC6B, platform: 0xC9A56B,
+                bamboo: false, streams: false, rocks: true, pillars: false,
+                accent: 0xA0522D
+            },
+            {
+                name: '雪山之巅',
+                sky: 0xB8D8E8, fog: 0xE8F4F8,
+                ground: 0xECEFF1, platform: 0xCFD8DC,
+                bamboo: false, streams: true, rocks: true, pillars: false,
+                accent: 0x607D8B
+            },
+            {
+                name: '熔岩深处',
+                sky: 0x4A0E0E, fog: 0x6B1F1F,
+                ground: 0x3D1810, platform: 0x8B3A1A,
+                bamboo: false, streams: false, rocks: true, pillars: false,
+                accent: 0xFF6B1A
+            },
+            {
+                name: '紫晶夜境',
+                sky: 0x2D1B4E, fog: 0x4A2C6E,
+                ground: 0x3D2B5E, platform: 0x7B5BA6,
+                bamboo: false, streams: false, rocks: true, pillars: true,
+                accent: 0xD4AF37
+            },
+            {
+                name: '樱花山谷',
+                sky: 0xFFE0EC, fog: 0xFFF0F5,
+                ground: 0xE8B4C8, platform: 0xD4A5B8,
+                bamboo: true, streams: true, rocks: false, pillars: true,
+                accent: 0xFF69B4
+            },
+        ];
+    }
+
+    /**
+     * 为指定关卡生成配置（每关首次随机，之后固定）
+     */
+    generateLevelConfig(levelNum) {
+        const themes = this.LEVEL_THEMES();
+        // 用 levelNum 作为随机种子，确保同一关卡风格稳定（重新加载也是同风格）
+        const seed = levelNum * 9301 + 49297;
+        const rng = (n) => {
+            const x = Math.sin((seed + n) * 12.9898) * 43758.5453;
+            return x - Math.floor(x);
+        };
+
+        const theme = themes[Math.floor(rng(1) * themes.length)];
+
+        // 平台数量随关卡缓慢递增（4~8 个）
+        const platformCount = 4 + Math.floor(rng(2) * 5);
+        const platforms = [];
+        for (let i = 0; i < platformCount; i++) {
+            // 平台位置：中央±15 范围内随机，高度 1.5~6 随机
+            platforms.push({
+                x: (rng(100 + i) - 0.5) * 30,
+                z: (rng(200 + i) - 0.5) * 30,
+                y: 1.5 + rng(300 + i) * 4.5,
+                w: 2 + rng(400 + i) * 2.5,  // 2~4.5 宽
+                d: 2 + rng(500 + i) * 2.5,  // 2~4.5 深
+                h: 0.4 + rng(600 + i) * 0.3, // 厚
+            });
+        }
+
+        // 矮墙配置（中央庭院）
+        const walls = [
+            { x: 0, z: -10, w: 14, h: 1.5, d: 0.4, doorX: 0, doorW: 3 },
+            { x: 0, z: 10, w: 14, h: 1.5, d: 0.4, doorX: 0, doorW: 3 },
+            { x: 10, z: 0, w: 0.4, h: 1.5, d: 14, doorZ: 0, doorW: 3 },
+            { x: -10, z: 0, w: 0.4, h: 1.5, d: 14, doorZ: 0, doorW: 3 },
+        ];
+
+        // 怪物数：每关 6 + 关卡 * 2（递增）
+        const enemyCount = 6 + levelNum * 2;
+
+        // 怪物属性（强度随关卡提升）
+        return {
+            levelNum,
+            theme,
+            platforms,
+            walls,
+            enemyCount,
+            enemyHealth: 80 + levelNum * 20,
+            enemyDamage: 8 + levelNum * 2,
+        };
+    }
+
+    /**
+     * 销毁当前关卡的所有场景对象
+     */
+    clearLevel() {
+        // 销毁关卡 mesh（地形、平台、墙、装饰、怪物、金球）
+        for (const obj of this.levelMeshes) {
+            if (obj && obj.parent) obj.parent.remove(obj);
+            // 释放几何/材质
+            if (obj.traverse) {
+                obj.traverse(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (Array.isArray(child.material)) {
+                            child.material.forEach(m => m.dispose());
+                        } else {
+                            child.material.dispose();
+                        }
+                    }
+                });
+            }
+        }
+        this.levelMeshes = [];
+
+        // 清空怪物数组（已经在 levelMeshes 中）
+        this.gameState.enemies = [];
+
+        // 清空金球
+        if (this.gateOrb) {
+            this.gateOrb = null;
+        }
+        this.gateOrbActive = false;
+
+        // 清空环境动画 hooks
+        this.levelAnimHooks = [];
+
+        // 重置怪物清理钩子
+        this.animateParticles = null;
+
+        console.log(`🧹 关卡 ${this.level} 场景已清理`);
+    }
+
+    /**
+     * 初始化一关：销毁旧场景 → 生成新地形/平台/墙/装饰 → 生成怪物
+     */
+    initLevel(levelNum) {
+        if (this.levelTransitioning) { console.warn('initLevel 被打断：levelTransitioning=true'); return; }
+        this.levelTransitioning = true;
+        console.log(`🏗️ initLevel(${levelNum}) 开始`);
+
+        // 清掉上一关
+        this.clearLevel();
+
+        // 重置碰撞结构（清空上一关的 walls/platforms/boundaries）
+        this.castleStructures = [];
+
+        // 生成配置
+        this.level = levelNum;
+        this.levelConfig = this.generateLevelConfig(levelNum);
+        this.levelEnemiesRequired = this.levelConfig.enemyCount;
+        this.levelEnemiesKilled = 0;
+        this.levelEnemiesSpawned = 0;
+        this.gateOrbActive = false;
+        this.lastEnemySpawn = Date.now();
+
+        const theme = this.levelConfig.theme;
+        const config = this.levelConfig;
+
+        // 应用天空/雾色
+        this.scene.background = new THREE.Color(theme.sky);
+        if (this.scene.fog) {
+            this.scene.fog.color.set(theme.fog);
+        }
+
+        // 地面
+        this.createGroundForLevel(theme);
+
+        // 中心石板路（始终保留，仅颜色变化）
+        this.createStonePath(theme);
+
+        // 中央矮墙
+        for (const wallCfg of config.walls) {
+            this.buildWallWithDoor(wallCfg, this.makeMaterial(theme.accent, 0.9, 0.05));
+        }
+
+        // 随机平台
+        for (const p of config.platforms) {
+            this.createPlatform(p, theme);
+        }
+
+        // 边界（远山 - 颜色随主题）
+        this.createBoundaryWallsForLevel(theme);
+
+        // 装饰（按主题选择）
+        if (theme.bamboo) this.createBamboos(theme);
+        if (theme.rocks) this.createRocks(theme);
+        if (theme.streams) this.createStreams(theme);
+        if (theme.pillars) this.createPillars(theme);
+
+        // 飘落粒子（颜色随主题）
+        this.createParticles(theme);
+
+        // 出生点：玩家位置
+        if (this.player && this.player.mesh) {
+            this.player.mesh.position.set(0, 0, 0);
+            this.player.mesh.rotation.y = 0;
+            this.gameState.player.position.copy(this.player.mesh.position);
+            this.gameState.player.health = this.gameState.player.maxHealth;
+            this.gameState.player.stamina = this.gameState.player.maxStamina;
+            this.gameState.player.velocityY = 0;
+
+            // 玩家脚下攻击范围圆环（蓝色，轻击 2.8，重击 4，取较大值）
+            if (this.playerAttackRing) {
+                this.scene.remove(this.playerAttackRing);
+            }
+            this.playerAttackRing = this._createRangeRing(4.0, 0x3B82F6, 0.15);
+            this.playerAttackRing.position.set(0, 0.05, 0);
+            this.scene.add(this.playerAttackRing);
+            this.levelMeshes.push(this.playerAttackRing);
+        }
+
+        // 生成怪物（按关卡配置固定数量，分批生成，每批 2 只）
+        this.spawnNextEnemyBatch();
+
+        // 更新 HUD
+        this.updateLevelHUD();
+
+        this.levelTransitioning = false;
+        console.log(`🎯 关卡 ${levelNum} 初始化完成：${theme.name}，需杀 ${this.levelEnemiesRequired} 只怪`);
+    }
+
+    /**
+     * 分批生成怪物，直到达成本关总数
+     */
+    spawnNextEnemyBatch() {
+        if (!this.levelConfig) return;
+        // 死亡界面显示中：暂停刷怪（防止死亡瞬间背后刷怪）
+        if (this._deathScreenShown) return;
+        const remaining = this.levelEnemiesRequired - this.levelEnemiesSpawned;
+        if (remaining <= 0) return;
+        if (this.gameState.enemies.length >= this.maxEnemies) return;
+
+        const batchSize = Math.min(2, remaining);
+        const enemyNames = ['小妖', '山贼', '野兽', '鬼怪'];
+        const config = this.levelConfig;
+        const playerPos = this.player.mesh.position;
+
+        for (let i = 0; i < batchSize; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 10 + Math.random() * 4;
+            const pos = new THREE.Vector3(
+                playerPos.x + Math.cos(angle) * dist,
+                0,
+                playerPos.z + Math.sin(angle) * dist
+            );
+            const enemy = new Enemy(this.scene, pos, enemyNames[Math.floor(Math.random() * enemyNames.length)], this);
+            // 用关卡配置覆盖怪物强度
+            enemy.health = config.enemyHealth;
+            enemy.maxHealth = config.enemyHealth;
+            enemy.attackDamage = config.enemyDamage;
+            this.gameState.enemies.push(enemy);
+            this.levelEnemiesSpawned++;
+        }
+
+        // 如果还在屏幕上限内且未全部生成，1.5 秒后再生成下一批
+        if (this.levelEnemiesSpawned < this.levelEnemiesRequired && this.gameState.enemies.length < this.maxEnemies) {
+            setTimeout(() => {
+                if (this.gameState.gameStarted && this.levelEnemiesSpawned < this.levelEnemiesRequired) {
+                    this.spawnNextEnemyBatch();
+                }
+            }, 1500);
+        }
+    }
+
+    /**
+     * 怪物死亡时调用：计数 + 检查过关
+     */
+    onEnemyKilled(enemy) {
+        this.levelEnemiesKilled++;
+        this.updateLevelHUD();
+        console.log(`☠️ 击杀 ${this.levelEnemiesKilled}/${this.levelEnemiesRequired}`);
+
+        // 检查是否杀光
+        if (this.levelEnemiesKilled >= this.levelEnemiesRequired) {
+            this.spawnGateOrb();
+        } else {
+            // 还没杀光但场上怪数减少，补刷
+            if (this.gameState.enemies.length < 2 && this.levelEnemiesSpawned < this.levelEnemiesRequired) {
+                setTimeout(() => this.spawnNextEnemyBatch(), 1000);
+            }
+        }
+    }
+
+    /**
+     * 在最高平台上生成金球（过关门）
+     */
+    spawnGateOrb() {
+        if (this.gateOrbActive) return;
+
+        // 找最高平台位置，没有就放在 (0, 8, -25)
+        let pos = { x: 0, y: 8, z: -25 };
+        if (this.levelConfig && this.levelConfig.platforms.length > 0) {
+            let maxY = -Infinity;
+            for (const p of this.levelConfig.platforms) {
+                const top = p.y + p.h / 2;
+                if (top > maxY) {
+                    maxY = top;
+                    pos = { x: p.x, y: top + 1.5, z: p.z };
+                }
+            }
+        }
+
+        // 金球：发光的金色 sphere
+        const orbGeo = new THREE.SphereGeometry(0.8, 24, 24);
+        const orbMat = new THREE.MeshStandardMaterial({
+            color: 0xFFD700,
+            emissive: 0xFFA500,
+            emissiveIntensity: 1.0,
+            metalness: 0.6,
+            roughness: 0.2
+        });
+        const orb = new THREE.Mesh(orbGeo, orbMat);
+        orb.position.set(pos.x, pos.y, pos.z);
+        orb.castShadow = true;
+        this.scene.add(orb);
+        this.gateOrb = orb;
+        this.gateOrbActive = true;
+
+        // 金球光晕
+        const light = new THREE.PointLight(0xFFD700, 2.0, 12);
+        light.position.set(pos.x, pos.y, pos.z);
+        this.scene.add(light);
+
+        // 金球上下浮动 + 自转
+        const baseY = pos.y;
+        const orbAnim = () => {
+            if (!this.gateOrb) return;
+            const t = Date.now() * 0.002;
+            this.gateOrb.position.y = baseY + Math.sin(t) * 0.3;
+            this.gateOrb.rotation.y = t;
+        };
+        this.levelAnimHooks.push(orbAnim);
+
+        // 把光晕和光也加到 levelMeshes（以便销毁）
+        this.levelMeshes.push(orb, light);
+
+        console.log(`🌟 金球已激活，触碰进入下一关！`);
+    }
+
+    /**
+     * 每帧检查玩家和金球的接触
+     */
+    checkGateTouch() {
+        if (!this.gateOrbActive || !this.gateOrb) return;
+        if (!this.player || !this.player.mesh) return;
+        const dist = this.player.mesh.position.distanceTo(this.gateOrb.position);
+        if (dist < 2.0) {
+            this.advanceToNextLevel();
+        }
+    }
+
+    /**
+     * 进入下一关
+     */
+    advanceToNextLevel() {
+        if (this.levelTransitioning) return;
+        const nextLevel = this.level + 1;
+        console.log(`✨ 通关！进入关卡 ${nextLevel}`);
+
+        // 显示通关提示（1.2 秒后自动切换到下一关）
+        this.showLevelBanner(`第 ${this.level} 关 - 通关！`, `进入第 ${nextLevel} 关...`);
+
+        setTimeout(() => {
+            this.hideLevelBanner();
+            // initLevel 内部会设置 levelTransitioning=true 并在结束时重置
+            this.initLevel(nextLevel);
+            // 进新关后显示一次"第 N 关"标题横幅
+            setTimeout(() => {
+                if (!this.levelTransitioning) {
+                    this.showLevelBanner(`第 ${nextLevel} 关`, this.levelConfig?.theme?.name || '');
+                }
+            }, 200);
+        }, 1200);
+    }
+
+    /**
+     * 关卡横幅提示
+     */
+    showLevelBanner(title, subtitle) {
+        let banner = document.getElementById('level-banner');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = 'level-banner';
+            banner.style.cssText = `
+                position: fixed; top: 50%; left: 50%;
+                transform: translate(-50%, -50%);
+                background: rgba(0,0,0,0.85);
+                color: white;
+                padding: 40px 80px;
+                border-radius: 12px;
+                border: 2px solid #FFD700;
+                box-shadow: 0 0 40px rgba(255,215,0,0.6);
+                text-align: center;
+                font-family: 'Microsoft YaHei', sans-serif;
+                z-index: 8888;
+                animation: bannerFadeIn 0.5s ease-out;
+            `;
+            document.body.appendChild(banner);
+        }
+        banner.innerHTML = `
+            <h2 style="margin:0 0 10px 0; color:#FFD700; font-size:36px;">${title}</h2>
+            <p style="margin:0; color:#ccc; font-size:18px;">${subtitle}</p>
+        `;
+        banner.style.display = 'block';
+    }
+
+    hideLevelBanner() {
+        const banner = document.getElementById('level-banner');
+        if (banner) banner.style.display = 'none';
+    }
+
+    /**
+     * 创建攻击范围圆环（用于可视化）
+     * @param {number} radius 圆环半径
+     * @param {number} color 颜色（十六进制）
+     * @param {number} opacity 透明度
+     */
+    _createRangeRing(radius, color, opacity) {
+        const points = [];
+        const segments = 48;
+        for (let i = 0; i <= segments; i++) {
+            const angle = (i / segments) * Math.PI * 2;
+            points.push(new THREE.Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius));
+        }
+        const geometry = new THREE.BufferGeometry().setFromPoints(points);
+        const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
+        return new THREE.Line(geometry, material);
+    }
+
+    /**
+     * 一次性战斗操作提示（进入游戏后显示 4 秒）
+     */
+    showCombatTips() {
+        const tips = document.createElement('div');
+        tips.id = 'combat-tips';
+        tips.innerHTML = `
+            <div style="text-align:center; font-weight:bold; color:#FFD700; margin-bottom:14px; font-size:18px;">⚔️ 战斗操作</div>
+            <div style="display:flex; gap:16px; flex-wrap:wrap; justify-content:center;">
+                <div class="tip-item"><span class="key">J</span>轻击</div>
+                <div class="tip-item"><span class="key">K</span>重击</div>
+                <div class="tip-item"><span class="key">空格</span>闪避</div>
+                <div class="tip-item"><span class="key">L</span>技能</div>
+            </div>
+            <div style="margin-top:10px; font-size:13px; color:#ccc; text-align:center;">
+                🔵 脚下蓝圈 = 你的攻击范围 &nbsp;|&nbsp; 🔴 怪物脚下 = 它的攻击范围
+            </div>
+        `;
+        tips.style.cssText = `
+            position: fixed; bottom: 20px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.85);
+            color: white;
+            padding: 14px 24px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,215,0,0.4);
+            font-family: 'Microsoft YaHei', sans-serif;
+            font-size: 14px;
+            z-index: 1001;
+            white-space: nowrap;
+        `;
+        document.body.appendChild(tips);
+
+        // 给 key 加样式
+        tips.querySelectorAll('.tip-item').forEach(el => {
+            el.style.cssText = 'display:flex; align-items:center; gap:6px;';
+        });
+        tips.querySelectorAll('.key').forEach(el => {
+            el.style.cssText = `
+                background: #333; color: #FFD700; padding: 2px 8px;
+                border-radius: 4px; font-weight: bold; border: 1px solid #555;
+            `;
+        });
+
+        // 4 秒后自动消失
+        setTimeout(() => {
+            const t = document.getElementById('combat-tips');
+            if (t) {
+                t.style.transition = 'opacity 0.5s';
+                t.style.opacity = '0';
+                setTimeout(() => t.remove(), 500);
+            }
+        }, 4000);
+    }
+
+    /**
+     * 更新关卡 HUD（关卡号 + 进度）
+     */
+    updateLevelHUD() {
+        let hud = document.getElementById('level-hud');
+        if (!hud) {
+            hud = document.createElement('div');
+            hud.id = 'level-hud';
+            hud.style.cssText = `
+                position: fixed; top: 20px; left: 50%;
+                transform: translateX(-50%);
+                background: rgba(0,0,0,0.7);
+                color: white;
+                padding: 10px 24px;
+                border-radius: 20px;
+                border: 1px solid rgba(255,215,0,0.5);
+                font-family: 'Microsoft YaHei', sans-serif;
+                font-size: 16px;
+                z-index: 1000;
+            `;
+            document.body.appendChild(hud);
+        }
+        const themeName = this.levelConfig?.theme?.name || '';
+        const remaining = Math.max(0, this.levelEnemiesRequired - this.levelEnemiesKilled);
+        hud.innerHTML = `
+            <span style="color:#FFD700;">第 ${this.level} 关</span>
+            <span style="margin: 0 12px; color:#888;">|</span>
+            <span style="color:#aaa;">${themeName}</span>
+            <span style="margin: 0 12px; color:#888;">|</span>
+            <span style="color:#fff;">剩余怪物: <span style="color:#FF6B6B;">${remaining}</span></span>
+        `;
+    }
+
+    /**
+     * 创建简易 PBR 材质（关卡生成用）
+     */
+    makeMaterial(color, roughness = 0.9, metalness = 0.0) {
+        return new THREE.MeshStandardMaterial({
+            color, roughness, metalness
+        });
+    }
+
+    createGroundForLevel(theme) {
+        const groundSize = 80;
+        const groundGeometry = new THREE.PlaneGeometry(groundSize, groundSize, 30, 30);
+        const groundMaterial = new THREE.MeshStandardMaterial({
+            color: theme.ground,
+            roughness: 0.95,
+            metalness: 0.0
+        });
+        const positions = groundGeometry.attributes.position;
+        for (let i = 0; i < positions.count; i++) {
+            const x = positions.getX(i);
+            const y = positions.getY(i);
+            const dist = Math.sqrt(x * x + y * y);
+            const height = Math.sin(x * 0.3) * Math.cos(y * 0.3) * 0.15;
+            const edgeRise = dist > groundSize / 2 - 3 ? (dist - (groundSize / 2 - 3)) * 0.5 : 0;
+            positions.setZ(i, height + edgeRise);
+        }
+        groundGeometry.computeVertexNormals();
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        this.scene.add(ground);
+        this.levelMeshes.push(ground);
+    }
+
+    createStonePath(theme) {
+        const stonePathGeo = new THREE.PlaneGeometry(3, 60, 1, 1);
+        const stonePathMat = new THREE.MeshStandardMaterial({
+            color: theme.platform,
+            roughness: 0.85
+        });
+        const stonePath = new THREE.Mesh(stonePathGeo, stonePathMat);
+        stonePath.rotation.x = -Math.PI / 2;
+        stonePath.position.y = 0.02;
+        stonePath.receiveShadow = true;
+        this.scene.add(stonePath);
+        this.levelMeshes.push(stonePath);
+    }
+
+    /**
+     * 创建一个平台 mesh，加入关卡结构 + meshes
+     */
+    createPlatform(p, theme) {
+        const platformMat = new THREE.MeshStandardMaterial({
+            color: theme.platform,
+            roughness: 0.85,
+            metalness: 0.1
+        });
+        const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(p.w, p.h, p.d),
+            platformMat
+        );
+        mesh.position.set(p.x, p.y, p.z);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        this.scene.add(mesh);
+        this.levelMeshes.push(mesh);
+        this.castleStructures.push({ mesh, type: 'platform' });
+    }
+
+    createBoundaryWallsForLevel(theme) {
+        const wallMat = new THREE.MeshStandardMaterial({
+            color: theme.accent,
+            roughness: 0.95
+        });
+        const boundary = 40;
+        const boundaries = [
+            { x: 0, z: -boundary, w: boundary * 2, d: 1 },
+            { x: 0, z: boundary, w: boundary * 2, d: 1 },
+            { x: -boundary, z: 0, w: 1, d: boundary * 2 },
+            { x: boundary, z: 0, w: 1, d: boundary * 2 },
+        ];
+        for (const b of boundaries) {
+            const wall = new THREE.Mesh(
+                new THREE.BoxGeometry(b.w, 12, b.d),
+                wallMat
+            );
+            wall.position.set(b.x, 6, b.z);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            this.scene.add(wall);
+            this.levelMeshes.push(wall);
+            this.castleStructures.push({ mesh: wall, type: 'boundary' });
+        }
+    }
+
+    createParticles(theme) {
+        const particleCount = 500;
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        for (let i = 0; i < particleCount * 3; i += 3) {
+            positions[i] = (Math.random() - 0.5) * 50;
+            positions[i + 1] = Math.random() * 20;
+            positions[i + 2] = (Math.random() - 0.5) * 50;
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const material = new THREE.PointsMaterial({
+            color: theme.accent,
+            size: 0.1,
+            transparent: true,
+            opacity: 0.6,
+            blending: THREE.AdditiveBlending
+        });
+        const particles = new THREE.Points(geometry, material);
+        this.scene.add(particles);
+        this.levelMeshes.push(particles);
+        this.animateParticles = () => {
+            const positions = particles.geometry.attributes.position.array;
+            for (let i = 1; i < positions.length; i += 3) {
+                positions[i] -= 0.02;
+                if (positions[i] < 0) positions[i] = 20;
+            }
+            particles.geometry.attributes.position.needsUpdate = true;
+        };
+    }
+
+    // ----- 占位的装饰方法（覆盖旧版本）-----
+    // 这些由 createEnvironment 的旧方法提供，下面将覆盖
 
     createEnvironment() {
         // ===== 青山绿水武侠风 3D 地图 =====
@@ -1045,8 +1758,9 @@ class Game {
         });
     }
 
-    createBamboos() {
-        // 竹林 - 武侠风标志元素
+    createBamboos(theme) {
+        // 竹林 - 武侠风标志元素（颜色随主题）
+        const accent = theme?.accent ?? 0x558B2F;
         const bambooMat = new THREE.MeshStandardMaterial({
             color: 0x558B2F,
             roughness: 0.7,
@@ -1056,16 +1770,17 @@ class Game {
             color: 0x33691E,
             roughness: 0.7
         });
+        const leafMat = new THREE.MeshStandardMaterial({
+            color: accent,
+            roughness: 0.6,
+            side: THREE.DoubleSide
+        });
 
-        // 随机分布竹子位置
         const bambooPositions = [
-            // 北院竹林
             [-13, -12], [-14, -8], [-13, -4], [-14, 0], [-13, 4], [-14, 8], [-13, 12],
             [13, -12], [14, -8], [13, -4], [14, 0], [13, 4], [14, 8], [13, 12],
-            // 东院竹林
             [-8, -13], [-4, -14], [0, -13], [4, -14], [8, -13],
             [-8, 13], [-4, 14], [0, 13], [4, 14], [8, 13],
-            // 南院
             [-8, 18], [-4, 19], [0, 18], [4, 19], [8, 18],
         ];
 
@@ -1073,29 +1788,21 @@ class Game {
             const height = 5 + Math.random() * 3;
             const segments = 4 + Math.floor(Math.random() * 2);
 
-            // 竹竿
             const bambooGeo = new THREE.CylinderGeometry(0.08, 0.12, height, 6);
             const bamboo = new THREE.Mesh(bambooGeo, idx % 3 === 0 ? bambooDarkMat : bambooMat);
             bamboo.position.set(x, height/2, z);
             bamboo.castShadow = true;
             this.scene.add(bamboo);
+            this.levelMeshes.push(bamboo);
 
-            // 竹节（每段一道深色环）
             for (let s = 1; s < segments; s++) {
                 const jointGeo = new THREE.TorusGeometry(0.13, 0.02, 4, 8);
                 const joint = new THREE.Mesh(jointGeo, bambooDarkMat);
                 joint.position.set(x, (height / segments) * s, z);
                 joint.rotation.x = Math.PI / 2;
                 this.scene.add(joint);
+                this.levelMeshes.push(joint);
             }
-
-            // 竹叶（在顶部）
-            const leafColor = 0x7CB342;
-            const leafMat = new THREE.MeshStandardMaterial({
-                color: leafColor,
-                roughness: 0.6,
-                side: THREE.DoubleSide
-            });
 
             for (let l = 0; l < 3; l++) {
                 const leafGroup = new THREE.Group();
@@ -1113,19 +1820,20 @@ class Game {
                 );
                 leafGroup.rotation.y = Math.random() * Math.PI * 2;
                 this.scene.add(leafGroup);
+                this.levelMeshes.push(leafGroup);
             }
         });
     }
 
-    createRocks() {
-        // 山石 - 散落在场景中
+    createRocks(theme) {
+        // 山石 - 散落在场景中（颜色随主题）
         const rockMat = new THREE.MeshStandardMaterial({
             color: 0x757575,
             roughness: 0.95,
             metalness: 0.05
         });
         const mossMat = new THREE.MeshStandardMaterial({
-            color: 0x689F38,
+            color: theme?.accent ?? 0x689F38,
             roughness: 0.9
         });
 
@@ -1141,7 +1849,6 @@ class Game {
         ];
 
         rockPositions.forEach(r => {
-            // 用多面体堆叠做假山
             const rockGeo = new THREE.DodecahedronGeometry(r.s, 0);
             const rock = new THREE.Mesh(rockGeo, rockMat);
             rock.position.set(r.x, r.y, r.z);
@@ -1149,19 +1856,20 @@ class Game {
             rock.castShadow = true;
             rock.receiveShadow = true;
             this.scene.add(rock);
+            this.levelMeshes.push(rock);
 
-            // 顶部苔藓
             const mossGeo = new THREE.SphereGeometry(r.s * 0.5, 6, 4);
             const moss = new THREE.Mesh(mossGeo, mossMat);
             moss.position.set(r.x, r.y + r.s * 0.7, r.z);
             this.scene.add(moss);
+            this.levelMeshes.push(moss);
         });
     }
 
-    createStreams() {
-        // 溪流 - 蓝色细长平面
+    createStreams(theme) {
+        // 溪流 - 颜色随主题
         const waterMat = new THREE.MeshStandardMaterial({
-            color: 0x4FC3F7,
+            color: theme?.sky ?? 0x4FC3F7,
             roughness: 0.1,
             metalness: 0.6,
             transparent: true,
@@ -1169,11 +1877,8 @@ class Game {
         });
 
         const streams = [
-            // 东南溪
             { x: 15, z: 0, w: 1.2, d: 20, rot: 0 },
-            // 西北溪
             { x: -15, z: 0, w: 1.2, d: 20, rot: 0 },
-            // 北溪
             { x: 0, z: -20, w: 20, d: 1.2, rot: 0 },
         ];
 
@@ -1185,8 +1890,8 @@ class Game {
             water.rotation.x = -Math.PI / 2;
             water.position.set(s.x, 0.05, s.z);
             this.scene.add(water);
+            this.levelMeshes.push(water);
 
-            // 水波动画
             const t0 = Date.now();
             const animateWater = () => {
                 const t = (Date.now() - t0) * 0.001;
@@ -1197,9 +1902,8 @@ class Game {
             this.animateEnvHooks.push(animateWater);
         });
 
-        // 小桥 - 跨过东南溪
         const bridgeMat = new THREE.MeshStandardMaterial({
-            color: 0x8B5A2B,
+            color: theme?.accent ?? 0x8B5A2B,
             roughness: 0.8
         });
         const bridge = new THREE.Mesh(
@@ -1210,8 +1914,8 @@ class Game {
         bridge.castShadow = true;
         bridge.receiveShadow = true;
         this.scene.add(bridge);
+        this.levelMeshes.push(bridge);
 
-        // 桥栏杆
         for (let side = -1; side <= 1; side += 2) {
             const rail = new THREE.Mesh(
                 new THREE.BoxGeometry(3, 0.8, 0.1),
@@ -1219,6 +1923,7 @@ class Game {
             );
             rail.position.set(15, 0.8, side * 1);
             this.scene.add(rail);
+            this.levelMeshes.push(rail);
         }
     }
 
@@ -1243,6 +1948,7 @@ class Game {
                     left.position.set((-halfW + leftW/2), wallH/2, cfg.z);
                     left.castShadow = true; left.receiveShadow = true;
                     this.scene.add(left);
+                    this.levelMeshes.push(left);
                     this.castleStructures.push({ mesh: left, type: 'wall' });
                 }
             }
@@ -1256,6 +1962,7 @@ class Game {
                     right.position.set((halfW - rightW/2), wallH/2, cfg.z);
                     right.castShadow = true; right.receiveShadow = true;
                     this.scene.add(right);
+                    this.levelMeshes.push(right);
                     this.castleStructures.push({ mesh: right, type: 'wall' });
                 }
             }
@@ -1266,6 +1973,7 @@ class Game {
             top.position.set(cfg.doorX, doorH + (wallH - doorH)/2, cfg.z);
             top.castShadow = true; top.receiveShadow = true;
             this.scene.add(top);
+            this.levelMeshes.push(top);
             this.castleStructures.push({ mesh: top, type: 'wall' });
         } else {
             // 纵向墙（沿Z轴延伸）
@@ -1282,6 +1990,7 @@ class Game {
                     front.position.set(cfg.x, wallH/2, (-halfD + frontD/2));
                     front.castShadow = true; front.receiveShadow = true;
                     this.scene.add(front);
+                    this.levelMeshes.push(front);
                     this.castleStructures.push({ mesh: front, type: 'wall' });
                 }
             }
@@ -1295,6 +2004,7 @@ class Game {
                     back.position.set(cfg.x, wallH/2, (halfD - backD/2));
                     back.castShadow = true; back.receiveShadow = true;
                     this.scene.add(back);
+                    this.levelMeshes.push(back);
                     this.castleStructures.push({ mesh: back, type: 'wall' });
                 }
             }
@@ -1305,6 +2015,7 @@ class Game {
             top.position.set(cfg.x, doorH + (wallH - doorH)/2, cfg.doorZ);
             top.castShadow = true; top.receiveShadow = true;
             this.scene.add(top);
+            this.levelMeshes.push(top);
             this.castleStructures.push({ mesh: top, type: 'wall' });
         }
     }
@@ -1524,14 +2235,16 @@ class Game {
         });
     }
 
-    createPillars() {
-        // 中央大厅 - 亭柱（替代原来的石柱）
+    createPillars(theme) {
+        // 凉亭柱（颜色随主题）
         const pillarGeometry = new THREE.CylinderGeometry(0.35, 0.4, 4.5, 8);
         const pillarMaterial = new THREE.MeshStandardMaterial({
-            color: 0x6D4C41, // 木柱
+            color: theme?.accent ?? 0x6D4C41,
             roughness: 0.8,
             metalness: 0.1
         });
+        const capMat = new THREE.MeshStandardMaterial({ color: 0x5D4037 });
+        const baseMat = new THREE.MeshStandardMaterial({ color: theme?.platform ?? 0x9E9E9E });
 
         const positions = [
             [-6, 2.25, -6], [6, 2.25, -6],
@@ -1544,92 +2257,27 @@ class Game {
             pillar.castShadow = true;
             pillar.receiveShadow = true;
             this.scene.add(pillar);
+            this.levelMeshes.push(pillar);
 
-            // 柱顶横梁
             const cap = new THREE.Mesh(
                 new THREE.BoxGeometry(1.4, 0.3, 0.3),
-                new THREE.MeshStandardMaterial({ color: 0x5D4037 })
+                capMat
             );
             cap.position.set(pos[0], pos[1] + 2.4, pos[2]);
             this.scene.add(cap);
+            this.levelMeshes.push(cap);
 
-            // 柱底石墩
             const base = new THREE.Mesh(
                 new THREE.CylinderGeometry(0.5, 0.55, 0.4, 8),
-                new THREE.MeshStandardMaterial({ color: 0x9E9E9E })
+                baseMat
             );
             base.position.set(pos[0], pos[1] - 2.05, pos[2]);
             this.scene.add(base);
+            this.levelMeshes.push(base);
         });
     }
     
-    createParticles() {
-        const particleCount = 500;
-        const geometry = new THREE.BufferGeometry();
-        const positions = new Float32Array(particleCount * 3);
-        
-        for (let i = 0; i < particleCount * 3; i += 3) {
-            positions[i] = (Math.random() - 0.5) * 50;
-            positions[i + 1] = Math.random() * 20;
-            positions[i + 2] = (Math.random() - 0.5) * 50;
-        }
-        
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        
-        const material = new THREE.PointsMaterial({
-            color: 0x38BDF8,
-            size: 0.1,
-            transparent: true,
-            opacity: 0.6,
-            blending: THREE.AdditiveBlending
-        });
-        
-        const particles = new THREE.Points(geometry, material);
-        this.scene.add(particles);
-        
-        // 粒子动画
-        this.animateParticles = () => {
-            const positions = particles.geometry.attributes.position.array;
-            for (let i = 1; i < positions.length; i += 3) {
-                positions[i] -= 0.02;
-                if (positions[i] < 0) {
-                    positions[i] = 20;
-                }
-            }
-            particles.geometry.attributes.position.needsUpdate = true;
-        };
-    }
-    
-    spawnEnemies() {
-        // 死亡/暂停期间不要生成
-        if (!this.gameState.gameStarted) return;
-        // 控制最多同时存在的怪物数量
-        if (this.gameState.enemies.length >= this.maxEnemies) {
-            return;
-        }
-
-        // 在玩家周围的不同位置生成怪物（起始少量，避免卡死）
-        const playerPos = this.player.mesh.position;
-        const count = Math.min(2 + Math.floor(Math.random() * 2), this.maxEnemies - this.gameState.enemies.length);
-        // 这里生成 2-3 只怪物，分布在玩家四周
-
-        const enemyNames = ['小妖', '山贼', '野兽', '鬼怪'];
-
-        for (let i = 0; i < count; i++) {
-            // 在玩家周围 8-12 单位距离内随机生成
-            const angle = Math.random() * Math.PI * 2;
-            const dist = 8 + Math.random() * 4;
-            const pos = new THREE.Vector3(
-                playerPos.x + Math.cos(angle) * dist,
-                0,
-                playerPos.z + Math.sin(angle) * dist
-            );
-
-            const nameIndex = Math.floor(Math.random() * enemyNames.length);
-            const enemy = new Enemy(this.scene, pos, enemyNames[nameIndex]);
-            this.gameState.enemies.push(enemy);
-        }
-    }
+    // (旧版 createParticles/spawnEnemies 已移除 - 改用 initLevel/spawnNextEnemyBatch)
     
     setupControls() {
         // 键盘控制
@@ -2192,8 +2840,10 @@ class Game {
         }
         this.gameState.enemies = [];
 
-        // 3. 重置怪物 spawn 计时
+        // 3. 重置怪物 spawn 计时 & 刷怪计数（让本关重新开始刷怪）
         this.lastEnemySpawn = Date.now();
+        this.levelEnemiesSpawned = 0;
+        this.levelEnemiesKilled = 0;
 
         // 4. 重置游戏状态标志，让 animate 恢复运行
         this.gameState.gameStarted = true;
@@ -2256,29 +2906,45 @@ class Game {
 
             // 检测敌人攻击玩家 - 尊重无敌帧
             if (!this.gameState.player.isDodging && !this.gameState.player.isInvulnerable) {
-                const distance = this.gameState.player.position.distanceTo(enemy.position);
-                if (distance < enemy.attackRange && Date.now() - enemy.lastAttackTime < 100) {
-                    this.gameState.updateHealth(this.gameState.player.health - 10);
+                const distance = this.gameState.player.position.distanceTo(enemy.mesh.position);
+                // 怪物只在攻击后的攻击窗口里伤血，且 cooldown 已过
+                const attackWindowMs = 400; // 攻击动画的伤害判定窗口
+                if (distance < enemy.attackRange
+                    && Date.now() - enemy.lastAttackTime < attackWindowMs
+                    && Date.now() - enemy.lastAttackTime > 50) { // 留出攻击前摇
+                    this.gameState.updateHealth(this.gameState.player.health - enemy.attackDamage);
                 }
             }
         });
-        
+
         // 清理死亡敌人
         this.gameState.enemies = this.gameState.enemies.filter(e => e.health > 0 && e.mesh);
 
-        // 检查是否需要生成新敌人 - 增加冷却时间防止反复生成
-        const now = Date.now();
-        if (this.gameState.enemies.length === 0 && now - this.lastEnemySpawn > 5000) {
-            this.lastEnemySpawn = now;
-            setTimeout(() => this.spawnEnemies(), 3000);
+        // 检查是否需要补刷怪物（本关还没杀光 & 场上少于 2 只）
+        if (this.levelEnemiesKilled < this.levelEnemiesRequired
+            && this.gameState.enemies.length < 2
+            && !this.levelTransitioning) {
+            this.spawnNextEnemyBatch();
         }
-        
+
+        // 检查金球接触（过关）
+        this.checkGateTouch();
+
+        // 更新玩家攻击范围圆环位置（跟随玩家）
+        if (this.playerAttackRing && this.player?.mesh) {
+            this.playerAttackRing.position.x = this.player.mesh.position.x;
+            this.playerAttackRing.position.z = this.player.mesh.position.z;
+        }
+
         // 更新粒子
         if (this.animateParticles) {
             this.animateParticles();
         }
 
-        // 更新环境动画（水晶旋转等）
+        // 更新关卡动画 hooks（金球、溪流等）
+        if (this.levelAnimHooks) {
+            this.levelAnimHooks.forEach(hook => hook());
+        }
         if (this.animateEnvHooks) {
             this.animateEnvHooks.forEach(hook => hook());
         }
