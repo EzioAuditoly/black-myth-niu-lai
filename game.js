@@ -394,10 +394,11 @@ class NiuLai {
         // 边界外（玩家超过 ±30）或者范围内没有任何可站表面 → 坠落虚空
         const playerX = this.mesh.position.x;
         const playerZ = this.mesh.position.z;
-        const outOfBounds = Math.abs(playerX) > 35 || Math.abs(playerZ) > 35;
+        // 地面是 80x80（半边 40），留 2m 缓冲，38 以外视为真正虚空（视觉外侧悬崖）
+        const outOfBounds = Math.abs(playerX) > 38 || Math.abs(playerZ) > 38;
 
-        // 中央地图区域（半径 28 内）地面有效，外圈虚空
-        const inMainArea = Math.abs(playerX) < 28 && Math.abs(playerZ) < 28;
+        // 主地图区域：地面/平台能站的范围（38 内都能站，与视觉地面一致）
+        const inMainArea = Math.abs(playerX) < 38 && Math.abs(playerZ) < 38;
 
         if (outOfBounds || (!hasStandingSurface && !inMainArea)) {
             // 在虚空里：地面无效，玩家持续下坠
@@ -1062,16 +1063,62 @@ class Game {
 
         // 平台数量随关卡缓慢递增（4~8 个）
         const platformCount = 4 + Math.floor(rng(2) * 5);
+
+        // ============== 阶梯跳台：最高平台放黄色球，从玩家可达位置逐级递增 ==============
+        // 玩家跳跃参数：moveSpeed=5、jumpForce=22、gravity=-32
+        //   跳跃峰值时间 = 22/32 = 0.6875s，最大水平位移 ≈ 6.9m
+        //   最大跳跃高度 = 22²/64 ≈ 7.6m
+        // 保守阶梯参数（给玩家留操作余量）：
+        const STEP_HORIZONTAL = 4.5;   // 每阶水平间距（平台中心距离）
+        const STEP_VERTICAL   = 1.8;   // 每阶高度差（远低于跳跃峰值 7.6m）
+        const PLATFORM_W = 3.5;        // 平台宽：水平间距 4.5 减去平台宽 3.5 = 1m 间隙（必须跳得过去）
+        const PLATFORM_D = 3.5;
+        const PLATFORM_H = 0.4;
+
+        // 阶梯层数 = floor(platformCount/2)（至少 4 阶），最高平台 = 顶
+        const stepCount = Math.max(4, Math.floor(platformCount / 2));
+        // 随机选一个方向作为阶梯朝向（东南西北四种），让关卡布局多变
+        const dirs = [
+            { dx: 1, dz: 0 },   // 东
+            { dx: 0, dz: 1 },   // 南
+            { dx: -1, dz: 0 },  // 西
+            { dx: 0, dz: -1 },  // 北
+        ];
+        const stairDir = dirs[Math.floor(rng(7) * dirs.length)];
+
         const platforms = [];
-        for (let i = 0; i < platformCount; i++) {
-            // 平台位置：中央±15 范围内随机，高度 1.5~6 随机
+        // 阶梯基础位置：起点在玩家 (0,0) 附近，第一阶台阶放在玩家边上 5m 处
+        // 每阶中心点 = 起点 + dir * (i * STEP_HORIZONTAL)，y 随 i 递增
+        const startX = stairDir.dx !== 0 ? stairDir.dx * 5 : (rng(8) - 0.5) * 4;
+        const startZ = stairDir.dz !== 0 ? stairDir.dz * 5 : (rng(9) - 0.5) * 4;
+        for (let i = 0; i < stepCount; i++) {
+            const cx = startX + stairDir.dx * i * STEP_HORIZONTAL;
+            const cz = startZ + stairDir.dz * i * STEP_HORIZONTAL;
+            // 第 0 阶 y=1.5（基础高度），每阶 +STEP_VERTICAL
+            const cy = 1.5 + i * STEP_VERTICAL;
             platforms.push({
-                x: (rng(100 + i) - 0.5) * 30,
-                z: (rng(200 + i) - 0.5) * 30,
-                y: 1.5 + rng(300 + i) * 4.5,
-                w: 2 + rng(400 + i) * 2.5,  // 2~4.5 宽
-                d: 2 + rng(500 + i) * 2.5,  // 2~4.5 深
-                h: 0.4 + rng(600 + i) * 0.3, // 厚
+                x: cx, y: cy, z: cz,
+                w: PLATFORM_W, d: PLATFORM_D, h: PLATFORM_H,
+                isGoal: i === stepCount - 1,    // 最高台：放黄球（关卡目标）
+                stairStep: i,                   // 标记阶梯序号
+            });
+        }
+
+        // 剩余名额给装饰平台：围绕阶梯但不挡路
+        const decorCount = platformCount - stepCount;
+        for (let i = 0; i < decorCount; i++) {
+            // 远离阶梯起点 ±6m 以外的范围，y 较低（不挡最高平台）
+            const angle = rng(100 + i) * Math.PI * 2;
+            const dist = 12 + rng(200 + i) * 12;   // 12~24m
+            platforms.push({
+                x: Math.cos(angle) * dist,
+                y: 1.0 + rng(300 + i) * 2.0,       // 0.5~2.5m 低装饰台
+                z: Math.sin(angle) * dist,
+                w: 2 + rng(400 + i) * 2.5,
+                d: 2 + rng(500 + i) * 2.5,
+                h: 0.4 + rng(600 + i) * 0.3,
+                isGoal: false,
+                stairStep: -1,
             });
         }
 
@@ -1162,6 +1209,9 @@ class Game {
         this.gateOrbActive = false;
         this.lastEnemySpawn = Date.now();
 
+        // 关卡 token：刷新后让所有旧的 setTimeout 失效（防止上一关的 timer 继续 spawn）
+        this._levelSpawnToken = (this._levelSpawnToken || 0) + 1;
+
         const theme = this.levelConfig.theme;
         const config = this.levelConfig;
 
@@ -1219,6 +1269,8 @@ class Game {
         }
 
         // 生成怪物（按关卡配置固定数量，分批生成，每批 2 只）
+        // 先烙印 token，让首批 spawn 用本关 token
+        this._spawnBatchToken = this._levelSpawnToken;
         this.spawnNextEnemyBatch();
 
         // 更新 HUD
@@ -1235,9 +1287,14 @@ class Game {
         if (!this.levelConfig) return;
         // 死亡界面显示中：暂停刷怪（防止死亡瞬间背后刷怪）
         if (this._deathScreenShown) return;
+        // 上一关残留下来的 setTimeout：token 不匹配则直接放弃
+        if (this._spawnBatchToken !== this._levelSpawnToken) return;
         const remaining = this.levelEnemiesRequired - this.levelEnemiesSpawned;
         if (remaining <= 0) return;
         if (this.gameState.enemies.length >= this.maxEnemies) return;
+
+        // 把当前 token 烙印在本批次上：未来 spawn 出来的怪被打死时补刷也走同一 token
+        this._spawnBatchToken = this._levelSpawnToken;
 
         const batchSize = Math.min(2, remaining);
         const enemyNames = ['小妖', '山贼', '野兽', '鬼怪'];
@@ -1258,13 +1315,18 @@ class Game {
             enemy.maxHealth = config.enemyHealth;
             enemy.attackDamage = config.enemyDamage;
             this.gameState.enemies.push(enemy);
+            // push 到 levelMeshes，关卡清理时才能彻底销毁
+            if (enemy.mesh) this.levelMeshes.push(enemy.mesh);
+            if (enemy.attackRing) this.levelMeshes.push(enemy.attackRing);
             this.levelEnemiesSpawned++;
         }
 
-        // 如果还在屏幕上限内且未全部生成，1.5 秒后再生成下一批
+        // 如果还没生成够且场上未满，1.5 秒后再生成下一批
+        // 绑定 token：关卡切换后旧 timer 自动失效
         if (this.levelEnemiesSpawned < this.levelEnemiesRequired && this.gameState.enemies.length < this.maxEnemies) {
+            const token = this._levelSpawnToken;
             setTimeout(() => {
-                if (this.gameState.gameStarted && this.levelEnemiesSpawned < this.levelEnemiesRequired) {
+                if (this._levelSpawnToken === token && this.gameState.gameStarted) {
                     this.spawnNextEnemyBatch();
                 }
             }, 1500);
@@ -1285,7 +1347,10 @@ class Game {
         } else {
             // 还没杀光但场上怪数减少，补刷
             if (this.gameState.enemies.length < 2 && this.levelEnemiesSpawned < this.levelEnemiesRequired) {
-                setTimeout(() => this.spawnNextEnemyBatch(), 1000);
+                const token = this._levelSpawnToken;
+                setTimeout(() => {
+                    if (this._levelSpawnToken === token) this.spawnNextEnemyBatch();
+                }, 1000);
             }
         }
     }
@@ -1373,10 +1438,11 @@ class Game {
             this.hideLevelBanner();
             // initLevel 内部会设置 levelTransitioning=true 并在结束时重置
             this.initLevel(nextLevel);
-            // 进新关后显示一次"第 N 关"标题横幅
+            // 进新关后显示一次"第 N 关"标题横幅，2.5s 后自动消失
             setTimeout(() => {
-                if (!this.levelTransitioning) {
+                if (!this.levelTransitioning && this.level === nextLevel) {
                     this.showLevelBanner(`第 ${nextLevel} 关`, this.levelConfig?.theme?.name || '');
+                    setTimeout(() => this.hideLevelBanner(), 2500);
                 }
             }, 200);
         }, 1200);
@@ -2907,12 +2973,18 @@ class Game {
             // 检测敌人攻击玩家 - 尊重无敌帧
             if (!this.gameState.player.isDodging && !this.gameState.player.isInvulnerable) {
                 const distance = this.gameState.player.position.distanceTo(enemy.mesh.position);
-                // 怪物只在攻击后的攻击窗口里伤血，且 cooldown 已过
-                const attackWindowMs = 400; // 攻击动画的伤害判定窗口
-                if (distance < enemy.attackRange
+                // 怪物只在"挥过拳"后（lastAttackTime > 0）的攻击窗口里才伤血
+                // 防止刚 spawn 或刚靠近就瞬间扣血
+                const attackWindowMs = 400;
+                // 同一只怪每 0.5 秒最多扣一次血（防多帧连续扣血秒杀）
+                const damageCooldownMs = 500;
+                if (enemy.lastAttackTime > 0
+                    && distance < enemy.attackRange
                     && Date.now() - enemy.lastAttackTime < attackWindowMs
-                    && Date.now() - enemy.lastAttackTime > 50) { // 留出攻击前摇
+                    && Date.now() - enemy.lastAttackTime > 50
+                    && (!enemy._lastDamageTime || Date.now() - enemy._lastDamageTime > damageCooldownMs)) {
                     this.gameState.updateHealth(this.gameState.player.health - enemy.attackDamage);
+                    enemy._lastDamageTime = Date.now();
                 }
             }
         });
